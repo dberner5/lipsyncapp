@@ -59,4 +59,11 @@ backend/__pycache__/
 
 # Logs
 logs/
-*.log 
+*.log
+
+# Uploads
+uploads/
+*.mp3
+*.wav
+*.ogg
+*.m4a 
