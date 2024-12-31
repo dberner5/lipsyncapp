@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response, send_file
 from flask_cors import CORS
 import logging
 import os
@@ -15,6 +15,9 @@ from pyannote.audio.pipelines.utils.hook import ProgressHook
 import subprocess
 from pathlib import Path
 import time
+import tempfile
+import base64
+from urllib.parse import unquote
 
 
 # Configure logging first
@@ -450,6 +453,132 @@ def generate_video(filename):
         
     except Exception as e:
         logger.error(f"Error retrieving lip sync data: {e}")
+        logger.exception("Full stack trace:")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/generate-mp4', methods=['POST'])
+def generate_mp4():
+    """Generate MP4 video using ffmpeg"""
+    try:
+        data = request.json
+        audio_file = data['audioFile']
+        background = data['background']
+        mouths = data['mouths']
+        
+        # Prepare paths
+        audio_path = os.path.join(app.config['UPLOAD_FOLDER'], audio_file)
+        if background == 'default':
+            bg_path = os.path.join('assets', 'backgrounds', 'background.jpg')
+        else:
+            # Handle base64 background image
+            bg_data = background.split(',')[1]
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp:
+                temp.write(base64.b64decode(bg_data))
+                bg_path = temp.name
+
+        # Create temporary directory for output
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, 'output.mp4')
+            
+            # Initialize lists for command building
+            inputs = []
+            filter_complex = []
+            
+            # Start with background image
+            filter_complex.append(f"[0:v]scale=1280:720,setsar=1[bg]")
+            
+            # Add each mouth as an overlay
+            for i, mouth in enumerate(mouths):
+                pos = mouth['position']
+                reflected = mouth['reflected']
+                mouth_cues = mouth['mouthCues']
+                
+                # Create overlay switches for each mouth shape
+                shapes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X']
+                for shape in shapes:
+                    shape_path = os.path.join(
+                        'assets',
+                        'mouth_shapes_reflected' if reflected else 'mouth_shapes',
+                        f'lisa-{shape}.png'
+                    )
+                    
+                    # Add input for this shape
+                    inputs.append('-i')
+                    inputs.append(shape_path)
+                    
+                    # Calculate enable times for this shape
+                    enable_expr = []
+                    for cue in mouth_cues:
+                        if cue['value'] == shape:
+                            enable_expr.append(
+                                f"between(t,{cue['start']},{cue['end']})"
+                            )
+                    
+                    if enable_expr:
+                        enable = '+'.join(enable_expr)
+                        
+                        # Scale and rotate the mouth shape
+                        filter_complex.append(
+                            f"[{len(inputs)//2}:v]scale=iw*{pos['scale']}:-1," +
+                            f"rotate={pos['rotation']}*PI/180:c=none:ow=rotw({pos['rotation']}*PI/180):oh=roth({pos['rotation']}*PI/180)" +
+                            f"[mouth{i}_{shape}]"
+                        )
+                        
+                        # Overlay with enable condition
+                        filter_complex.append(
+                            f"[bg][mouth{i}_{shape}]overlay=" +
+                            f"x={pos['x']}*W/100-w/2:y={pos['y']}*H/100-h/2:" +
+                            f"enable='{enable}'[bg]"
+                        )
+            
+            # Build the ffmpeg command
+            cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output file
+                '-loop', '1',  # Loop the background image
+                '-i', bg_path,  # Background image
+                *inputs,  # All mouth shape inputs
+                '-i', audio_path,  # Audio input
+                '-filter_complex', ';'.join(filter_complex),
+                '-map', '[bg]',  # Use the final background with overlays
+                '-map', f'{len(inputs)//2 + 1}:a',  # Map the audio
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-tune', 'stillimage',
+                '-crf', '23',
+                '-c:a', 'aac',
+                '-shortest',  # End when audio ends
+                '-pix_fmt', 'yuv420p',  # Ensure compatibility
+                '-r', '30',  # 30fps
+                output_path
+            ]
+            
+            logger.info(f"Running ffmpeg command: {' '.join(cmd)}")
+            
+            # Run ffmpeg
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Wait for completion
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logger.error(f"ffmpeg error: {stderr.decode()}")
+                return jsonify({"error": "Failed to generate video"}), 500
+            
+            # Return the video file
+            return send_file(
+                output_path,
+                mimetype='video/mp4',
+                as_attachment=True,
+                download_name=f'animation_{int(time.time())}.mp4'
+            )
+            
+    except Exception as e:
+        logger.error(f"Error generating video: {e}")
         logger.exception("Full stack trace:")
         return jsonify({"error": str(e)}), 500
 

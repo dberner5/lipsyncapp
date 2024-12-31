@@ -27,6 +27,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import MovieIcon from '@mui/icons-material/Movie';
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
+import DownloadIcon from '@mui/icons-material/Download';
 
 function App() {
   const [message, setMessage] = useState('');
@@ -52,6 +53,8 @@ function App() {
   const [reflectedMouths, setReflectedMouths] = useState({});
   const [masterAudio, setMasterAudio] = useState(null);
   const [isMasterPlaying, setIsMasterPlaying] = useState(false);
+  const [generatingMp4, setGeneratingMp4] = useState(false);
+  const [mp4Progress, setMp4Progress] = useState(0);
 
   useEffect(() => {
     fetch('http://127.0.0.1:5000/api/hello')
@@ -533,6 +536,59 @@ function App() {
     }
   };
 
+  const handleDownloadVideo = async () => {
+    if (!originalFiles[0] || !Object.keys(mouthPositions).length) return;
+    
+    setGeneratingMp4(true);
+    setMp4Progress(0);
+    setError('');
+
+    try {
+      const videoData = {
+        audioFile: originalFiles[0].filename,
+        background: selectedBackground === 'default' ? 'default' : customBackground,
+        mouths: Object.entries(mouthPositions).map(([filename, position]) => ({
+          filename,
+          position,
+          reflected: reflectedMouths[filename],
+          mouthCues: mouthCues[filename]
+        }))
+      };
+
+      const response = await fetch('http://127.0.0.1:5000/api/generate-mp4', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(videoData)
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to generate video');
+      }
+
+      // Get the video as a blob
+      const blob = await response.blob();
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `animation_${new Date().getTime()}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('Error generating video:', error);
+      setError(error.message || 'Failed to generate video');
+    } finally {
+      setGeneratingMp4(false);
+      setMp4Progress(0);
+    }
+  };
+
   return (
     <Container maxWidth="sm">
       <Box sx={{ 
@@ -814,15 +870,31 @@ function App() {
                   <Typography variant="subtitle1">
                     Selected Background
                   </Typography>
-                  <Button
-                    variant="contained"
-                    startIcon={isMasterPlaying ? <PauseIcon /> : <PlayArrowIcon />}
-                    onClick={handleMasterPlayPause}
-                    disabled={!originalFiles.length || !Object.keys(mouthPositions).length}
-                  >
-                    {isMasterPlaying ? 'Pause' : 'Play Animation'}
-                  </Button>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Button
+                      variant="contained"
+                      startIcon={isMasterPlaying ? <PauseIcon /> : <PlayArrowIcon />}
+                      onClick={handleMasterPlayPause}
+                      disabled={!originalFiles.length || !Object.keys(mouthPositions).length}
+                    >
+                      {isMasterPlaying ? 'Pause' : 'Play Animation'}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      color="secondary"
+                      startIcon={<DownloadIcon />}
+                      onClick={handleDownloadVideo}
+                      disabled={!originalFiles.length || !Object.keys(mouthPositions).length || generatingMp4}
+                    >
+                      {generatingMp4 ? 'Generating...' : 'Download MP4'}
+                    </Button>
+                  </Box>
                 </Box>
+                {generatingMp4 && (
+                  <Box sx={{ width: '100%', mt: 1 }}>
+                    <LinearProgress />
+                  </Box>
+                )}
                 <Card>
                   <Box sx={{ position: 'relative' }}>
                     <CardMedia
