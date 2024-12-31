@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Container, 
   Typography, 
@@ -14,7 +14,10 @@ import {
   CircularProgress,
   Collapse,
   LinearProgress,
-  Grid
+  Grid,
+  Card,
+  CardMedia,
+  CardActionArea
 } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
@@ -23,6 +26,7 @@ import SpeakerNotesIcon from '@mui/icons-material/SpeakerNotes';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import MovieIcon from '@mui/icons-material/Movie';
+import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
 
 function App() {
   const [message, setMessage] = useState('');
@@ -39,6 +43,15 @@ function App() {
   const [generatingVideo, setGeneratingVideo] = useState({});
   const [mouthCues, setMouthCues] = useState({});
   const [currentMouthShape, setCurrentMouthShape] = useState({});
+  const [selectedBackground, setSelectedBackground] = useState(null);
+  const [customBackground, setCustomBackground] = useState(null);
+  const [mouthPositions, setMouthPositions] = useState({});
+  const [selectedMouth, setSelectedMouth] = useState(null);
+  const [preloadedImages, setPreloadedImages] = useState({});
+  const [imageLoadingStatus, setImageLoadingStatus] = useState('loading');
+  const [reflectedMouths, setReflectedMouths] = useState({});
+  const [masterAudio, setMasterAudio] = useState(null);
+  const [isMasterPlaying, setIsMasterPlaying] = useState(false);
 
   useEffect(() => {
     fetch('http://127.0.0.1:5000/api/hello')
@@ -52,10 +65,111 @@ function App() {
     fetchFiles();
   }, []);
 
+  useEffect(() => {
+    const shapes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'];
+    const maxRetries = 3;
+    const retryDelay = 1000;
+
+    const loadImageWithRetry = (shape, isReflected, retryCount = 0) => {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        const folder = isReflected ? 'mouth_shapes_reflected' : 'mouth_shapes';
+        
+        img.onload = () => {
+          console.log(`Successfully loaded ${isReflected ? 'reflected' : 'regular'} image: lisa-${shape}.png`);
+          resolve({ shape, isReflected, img });
+        };
+        
+        img.onerror = () => {
+          console.error(`Failed to load ${isReflected ? 'reflected' : 'regular'} image: lisa-${shape}.png (attempt ${retryCount + 1})`);
+          if (retryCount < maxRetries) {
+            setTimeout(() => {
+              loadImageWithRetry(shape, isReflected, retryCount + 1)
+                .then(resolve)
+                .catch(reject);
+            }, retryDelay);
+          } else {
+            reject(new Error(`Failed to load ${isReflected ? 'reflected' : 'regular'} image: lisa-${shape}.png after ${maxRetries} attempts`));
+          }
+        };
+
+        img.src = `/assets/${folder}/lisa-${shape}.png`;
+      });
+    };
+
+    setImageLoadingStatus('loading');
+    
+    const loadAllImages = async () => {
+      const imageMap = { regular: {}, reflected: {} };
+      let errors = [];
+
+      for (const shape of shapes) {
+        try {
+          // Load both regular and reflected versions
+          const [regular, reflected] = await Promise.all([
+            loadImageWithRetry(shape, false),
+            loadImageWithRetry(shape, true)
+          ]);
+          
+          imageMap.regular[shape] = regular.img.src;
+          imageMap.reflected[shape] = reflected.img.src;
+        } catch (error) {
+          console.error(error);
+          errors.push(shape);
+        }
+      }
+
+      if (errors.length > 0) {
+        console.error('Failed to load some images:', errors);
+        setImageLoadingStatus('error');
+        setError(`Failed to load some mouth shapes: ${errors.join(', ')}`);
+      } else {
+        console.log('All images loaded successfully');
+        setImageLoadingStatus('success');
+        setPreloadedImages(imageMap);
+      }
+    };
+
+    loadAllImages();
+  }, []);
+
   const fetchFiles = () => {
     fetch('http://127.0.0.1:5000/api/files')
       .then(response => response.json())
-      .then(data => setFiles(data.files))
+      .then(data => {
+        setFiles(data.files);
+        
+        // Check for existing rhubarb results for each split file
+        const splitFiles = getLatestSplitFiles(
+          data.files.filter(file => file.type === 'split')
+        );
+        
+        splitFiles.forEach(({filename}) => {
+          const baseFilename = filename.replace('.wav', '');
+          const rhubarbFilename = `${baseFilename}_rhubarb.json`;
+          
+          // Try to fetch existing rhubarb results
+          fetch(`http://127.0.0.1:5000/api/results/${rhubarbFilename}`)
+            .then(response => {
+              if (!response.ok) throw new Error('No cached results');
+              return response.json();
+            })
+            .then(data => {
+              console.log('Found cached rhubarb results for:', filename);
+              setRhubarbResults(prev => ({
+                ...prev,
+                [filename]: data
+              }));
+              setMouthCues(prev => ({
+                ...prev,
+                [filename]: data.mouthCues
+              }));
+            })
+            .catch(error => {
+              console.log('No cached results for:', filename);
+            });
+        });
+      })
       .catch(error => console.error('Error fetching files:', error));
   };
 
@@ -298,6 +412,127 @@ function App() {
     }));
   };
 
+  const handleBackgroundUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const imageUrl = URL.createObjectURL(file);
+    setCustomBackground(imageUrl);
+    setSelectedBackground('custom');
+  };
+
+  const handleAddMouth = (filename) => {
+    setMouthPositions(prev => ({
+      ...prev,
+      [filename]: {
+        x: 50,
+        y: 50,
+        scale: 1,
+        rotation: 0
+      }
+    }));
+    setReflectedMouths(prev => ({
+      ...prev,
+      [filename]: false
+    }));
+  };
+
+  const handleMouthChange = (filename, property, value) => {
+    setMouthPositions(prev => ({
+      ...prev,
+      [filename]: {
+        ...prev[filename],
+        [property]: value
+      }
+    }));
+  };
+
+  const handleMouthReflect = (filename) => {
+    setReflectedMouths(prev => ({
+      ...prev,
+      [filename]: !prev[filename]
+    }));
+  };
+
+  const renderMouthShape = useMemo(() => (shape, style, filename) => {
+    if (imageLoadingStatus === 'loading') {
+      return (
+        <Box
+          sx={{
+            ...style,
+            width: '100px',
+            height: '100px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(0, 0, 0, 0.1)'
+          }}
+        >
+          <CircularProgress size={20} />
+        </Box>
+      );
+    }
+
+    const isReflected = reflectedMouths[filename];
+    const images = preloadedImages[isReflected ? 'reflected' : 'regular'];
+
+    if (!images || !images[shape]) {
+      return (
+        <Box
+          sx={{
+            ...style,
+            width: '100px',
+            height: '100px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(255, 0, 0, 0.1)'
+          }}
+        >
+          <Typography variant="caption" color="error">
+            Failed to load
+          </Typography>
+        </Box>
+      );
+    }
+
+    return (
+      <img
+        key={shape}
+        src={images[shape]}
+        alt={`Mouth shape ${shape}`}
+        style={style}
+      />
+    );
+  }, [preloadedImages, imageLoadingStatus, reflectedMouths]);
+
+  const handleMasterPlayPause = () => {
+    if (!originalFiles[0]) return;
+
+    if (isMasterPlaying) {
+      masterAudio?.pause();
+      setIsMasterPlaying(false);
+    } else {
+      if (masterAudio) {
+        masterAudio.play();
+      } else {
+        const audio = new Audio(`http://127.0.0.1:5000/api/audio/${originalFiles[0].filename}`);
+        audio.addEventListener('timeupdate', () => {
+          // Update all mouth shapes
+          Object.keys(mouthPositions).forEach(filename => {
+            updateMouthShape(filename, audio.currentTime);
+          });
+        });
+        audio.addEventListener('ended', () => {
+          setIsMasterPlaying(false);
+        });
+        audio.play();
+        setMasterAudio(audio);
+      }
+      setIsMasterPlaying(true);
+    }
+  };
+
   return (
     <Container maxWidth="sm">
       <Box sx={{ 
@@ -470,19 +705,14 @@ function App() {
                                 backgroundColor: '#000'
                               }}>
                                 {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => (
-                                  <img
-                                    key={shape}
-                                    src={`/assets/mouth_shapes/lisa-${shape}.png`}
-                                    alt={`Mouth shape ${shape}`}
-                                    style={{ 
-                                      position: 'absolute',
-                                      top: '50%',
-                                      left: '50%',
-                                      transform: 'translate(-50%, -50%)',
-                                      maxWidth: '33%',
-                                      display: currentMouthShape[filename] === shape ? 'block' : 'none'
-                                    }}
-                                  />
+                                  renderMouthShape(shape, { 
+                                    position: 'absolute',
+                                    top: '50%',
+                                    left: '50%',
+                                    transform: 'translate(-50%, -50%)',
+                                    maxWidth: '33%',
+                                    display: currentMouthShape[filename] === shape ? 'block' : 'none'
+                                  }, filename)
                                 ))}
                               </Box>
                             )}
@@ -496,6 +726,232 @@ function App() {
             </>
           )}
         </Paper>
+
+        {splitFiles.length > 0 && (
+          <Paper sx={{ p: 2, width: '100%', mt: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Create Video
+            </Typography>
+            <Typography variant="subtitle1" gutterBottom>
+              Select Background Image
+            </Typography>
+            <Grid container spacing={2}>
+              <Grid item xs={6}>
+                <Card>
+                  <CardActionArea 
+                    onClick={() => setSelectedBackground('default')}
+                    sx={{ 
+                      border: selectedBackground === 'default' ? 2 : 0,
+                      borderColor: 'primary.main'
+                    }}
+                  >
+                    <CardMedia
+                      component="img"
+                      height="140"
+                      image="/assets/backgrounds/background.jpg"
+                      alt="Default background"
+                    />
+                    <Box sx={{ p: 1 }}>
+                      <Typography variant="body2">
+                        Default Background
+                      </Typography>
+                    </Box>
+                  </CardActionArea>
+                </Card>
+              </Grid>
+              <Grid item xs={6}>
+                <Card>
+                  <CardActionArea 
+                    component="label"
+                    sx={{ 
+                      height: '100%',
+                      border: selectedBackground === 'custom' ? 2 : 0,
+                      borderColor: 'primary.main'
+                    }}
+                  >
+                    {customBackground ? (
+                      <CardMedia
+                        component="img"
+                        height="140"
+                        image={customBackground}
+                        alt="Custom background"
+                      />
+                    ) : (
+                      <Box sx={{ 
+                        height: 140, 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        backgroundColor: 'grey.100'
+                      }}>
+                        <AddPhotoAlternateIcon sx={{ fontSize: 40, color: 'grey.500' }} />
+                      </Box>
+                    )}
+                    <input
+                      type="file"
+                      hidden
+                      accept="image/*"
+                      onChange={handleBackgroundUpload}
+                    />
+                    <Box sx={{ p: 1 }}>
+                      <Typography variant="body2">
+                        {customBackground ? 'Custom Background' : 'Upload Background'}
+                      </Typography>
+                    </Box>
+                  </CardActionArea>
+                </Card>
+              </Grid>
+            </Grid>
+
+            {selectedBackground && (
+              <Box sx={{ mt: 3 }}>
+                <Box sx={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  mb: 2
+                }}>
+                  <Typography variant="subtitle1">
+                    Selected Background
+                  </Typography>
+                  <Button
+                    variant="contained"
+                    startIcon={isMasterPlaying ? <PauseIcon /> : <PlayArrowIcon />}
+                    onClick={handleMasterPlayPause}
+                    disabled={!originalFiles.length || !Object.keys(mouthPositions).length}
+                  >
+                    {isMasterPlaying ? 'Pause' : 'Play Animation'}
+                  </Button>
+                </Box>
+                <Card>
+                  <Box sx={{ position: 'relative' }}>
+                    <CardMedia
+                      component="img"
+                      sx={{
+                        width: '100%',
+                        height: 'auto',
+                        objectFit: 'contain',
+                        maxHeight: '70vh'
+                      }}
+                      image={selectedBackground === 'default' ? 
+                        '/assets/backgrounds/background.jpg' : 
+                        customBackground}
+                      alt="Selected background"
+                    />
+                    
+                    {Object.entries(mouthPositions).map(([filename, position]) => (
+                      <Box
+                        key={filename}
+                        sx={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          height: '100%',
+                          cursor: selectedMouth === filename ? 'move' : 'pointer',
+                          border: selectedMouth === filename ? '2px solid blue' : 'none'
+                        }}
+                        onClick={() => setSelectedMouth(filename)}
+                      >
+                        {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => 
+                          renderMouthShape(shape, { 
+                            position: 'absolute',
+                            top: `${position.y}%`,
+                            left: `${position.x}%`,
+                            transform: `translate(-50%, -50%) scale(${position.scale}) rotate(${position.rotation}deg)`,
+                            maxWidth: '33%',
+                            display: currentMouthShape[filename] === shape ? 'block' : 'none'
+                          }, filename)
+                        )}
+                      </Box>
+                    ))}
+                  </Box>
+                </Card>
+
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="subtitle1" gutterBottom>
+                    Add Mouth Animation
+                  </Typography>
+                  <Grid container spacing={2}>
+                    {splitFiles.map(({filename}) => (
+                      <Grid item xs={6} key={filename}>
+                        <Button
+                          variant="outlined"
+                          fullWidth
+                          onClick={() => handleAddMouth(filename)}
+                          disabled={mouthPositions[filename]}
+                        >
+                          Add {filename}
+                        </Button>
+                      </Grid>
+                    ))}
+                  </Grid>
+                </Box>
+
+                {selectedMouth && mouthPositions[selectedMouth] && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="subtitle1" gutterBottom>
+                      Adjust Selected Mouth
+                    </Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={6}>
+                        <Typography>X Position: {mouthPositions[selectedMouth].x}%</Typography>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={mouthPositions[selectedMouth].x}
+                          onChange={(e) => handleMouthChange(selectedMouth, 'x', Number(e.target.value))}
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography>Y Position: {mouthPositions[selectedMouth].y}%</Typography>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={mouthPositions[selectedMouth].y}
+                          onChange={(e) => handleMouthChange(selectedMouth, 'y', Number(e.target.value))}
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography>Scale: {mouthPositions[selectedMouth].scale.toFixed(1)}x</Typography>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="3"
+                          step="0.1"
+                          value={mouthPositions[selectedMouth].scale}
+                          onChange={(e) => handleMouthChange(selectedMouth, 'scale', Number(e.target.value))}
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography>Rotation: {mouthPositions[selectedMouth].rotation}°</Typography>
+                        <input
+                          type="range"
+                          min="-180"
+                          max="180"
+                          value={mouthPositions[selectedMouth].rotation}
+                          onChange={(e) => handleMouthChange(selectedMouth, 'rotation', Number(e.target.value))}
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography>Reflect</Typography>
+                        <Button
+                          variant={reflectedMouths[selectedMouth] ? "contained" : "outlined"}
+                          onClick={() => handleMouthReflect(selectedMouth)}
+                          fullWidth
+                        >
+                          {reflectedMouths[selectedMouth] ? "Reflected" : "Normal"}
+                        </Button>
+                      </Grid>
+                    </Grid>
+                  </Box>
+                )}
+              </Box>
+            )}
+          </Paper>
+        )}
       </Box>
     </Container>
   );
