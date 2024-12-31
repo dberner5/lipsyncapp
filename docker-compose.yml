@@ -11,6 +11,9 @@ services:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+    command: >
+      bash -c "chmod +x /app/executables/Rhubarb-Lip-Sync-1.13.0-Linux/rhubarb &&
+               python -u app.py"
     networks:
       - app-network
 

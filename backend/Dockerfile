@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y \
     libavutil-dev \
     libswscale-dev \
     libswresample-dev \
+    python3-opencv \
+    libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Clean pip install
