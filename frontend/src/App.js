@@ -55,18 +55,8 @@ function App() {
   const [isMasterPlaying, setIsMasterPlaying] = useState(false);
   const [generatingMp4, setGeneratingMp4] = useState(false);
   const [mp4Progress, setMp4Progress] = useState(0);
+  const [numSpeakers, setNumSpeakers] = useState(2);
 
-  useEffect(() => {
-    fetch('http://127.0.0.1:5000/api/hello')
-      .then(response => response.json())
-      .then(data => setMessage(data.message))
-      .catch(error => {
-        console.error('Error:', error);
-        setError(error.message);
-      });
-
-    fetchFiles();
-  }, []);
 
   useEffect(() => {
     const shapes = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'];
@@ -210,7 +200,11 @@ function App() {
 
     try {
       const response = await fetch(`http://127.0.0.1:5000/api/diarize/${selectedFile}`, {
-        method: 'POST'
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ numSpeakers })
       });
       const data = await response.json();
 
@@ -267,8 +261,8 @@ function App() {
         const { value, done } = await reader.read();
         if (done) break;
         
-        const chunk = decoder.decode(value);
-        const lines = chunk.split('\n');
+        const line = decoder.decode(value);
+        const lines = line.split('\n');
         
         for (const line of lines) {
           if (line.trim() === '') continue;
@@ -277,20 +271,39 @@ function App() {
             const data = JSON.parse(line.replace('data: ', ''));
             console.log('Progress update:', filename, data);
             
-            setRhubarbProgress(prev => ({
-              ...prev,
-              [filename]: data
-            }));
-
+            if (data.status === 'error') {
+              setError(data.error || 'Rhubarb processing failed');
+              break;
+            }
+            
             if (data.status === 'done') {
               setRhubarbResults(prev => ({
                 ...prev,
                 [filename]: data.data
               }));
+              setMouthCues(prev => ({
+                ...prev,
+                [filename]: data.data.mouthCues
+              }));
+              setCurrentMouthShape(prev => ({
+                ...prev,
+                [filename]: 'X'
+              }));
+              // Set progress to 100% when done
+              setRhubarbProgress(prev => ({
+                ...prev,
+                [filename]: { status: 'done', progress: 100 }
+              }));
               break;
-            } else if (data.status === 'error') {
-              setError(data.error || 'Rhubarb processing failed');
-              break;
+            } else {
+              // Update progress for any other status
+              setRhubarbProgress(prev => ({
+                ...prev,
+                [filename]: { 
+                  status: 'processing',
+                  progress: data.progress || prev[filename]?.progress || 0
+                }
+              }));
             }
           } catch (e) {
             console.error('Error parsing progress data:', e);
@@ -302,6 +315,15 @@ function App() {
       setError('Rhubarb processing failed');
     } finally {
       setProcessingRhubarb(prev => ({ ...prev, [filename]: false }));
+    }
+  };
+
+  const handleGenerateAllLipSync = async () => {
+    setError('');
+    
+    // Process each speaker's audio file sequentially
+    for (const {filename} of splitFiles) {
+      await handleRhubarbProcess(filename);
     }
   };
 
@@ -329,6 +351,10 @@ function App() {
     
     // Return only the latest files
     return Object.values(groupedFiles);
+  };
+
+  const getSpeakerDisplayName = (filename, index) => {
+    return `Speaker ${index + 1}`;
   };
 
   const originalFiles = files.filter(file => 
@@ -364,39 +390,6 @@ function App() {
         </Box>
       </Box>
     );
-  };
-
-  const handleGenerateVideo = async (filename) => {
-    // Get the rhubarb results filename - remove .wav extension first
-    const baseFilename = filename.replace('.wav', '');
-    const rhubarbFilename = `${baseFilename}_rhubarb.json`;
-    console.log('Getting lip sync data for:', rhubarbFilename);
-    
-    setGeneratingVideo(prev => ({ ...prev, [filename]: true }));
-    setError('');
-
-    try {
-        const response = await fetch(`http://127.0.0.1:5000/api/generate-video/${rhubarbFilename}`, {
-            method: 'POST'
-        });
-        const data = await response.json();
-
-        if (response.ok) {
-            console.log('Lip sync data received:', data);
-            setMouthCues(prev => ({
-                ...prev,
-                [filename]: data.mouthCues
-            }));
-        } else {
-            console.error('Failed to get lip sync data:', data.error);
-            setError(data.error || 'Failed to get lip sync data');
-        }
-    } catch (error) {
-        console.error('Error:', error);
-        setError('Failed to get lip sync data');
-    } finally {
-        setGeneratingVideo(prev => ({ ...prev, [filename]: false }));
-    }
   };
 
   const updateMouthShape = (filename, currentTime) => {
@@ -437,6 +430,10 @@ function App() {
     setReflectedMouths(prev => ({
       ...prev,
       [filename]: false
+    }));
+    setCurrentMouthShape(prev => ({
+      ...prev,
+      [filename]: 'X'
     }));
   };
 
@@ -598,15 +595,6 @@ function App() {
         alignItems: 'center',
         gap: 3
       }}>
-        <Typography variant="h4" component="h1" gutterBottom>
-          {message || 'Loading...'}
-        </Typography>
-
-        {error && (
-          <Alert severity="error" sx={{ width: '100%' }}>
-            {error}
-          </Alert>
-        )}
 
         <Paper sx={{ p: 2, width: '100%' }}>
           <Typography variant="h6" gutterBottom>
@@ -626,14 +614,64 @@ function App() {
             />
           </Button>
 
+          {originalFiles.length > 0 && (
+            <List>
+              {originalFiles.map(({filename}) => (
+                <ListItem
+                  key={filename}
+                  secondaryAction={
+                    <IconButton 
+                      edge="end" 
+                      onClick={() => handlePlayPause(filename)}
+                    >
+                      {currentAudio && 
+                       currentAudio.src.includes(filename) && 
+                       isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
+                    </IconButton>
+                  }
+                >
+                  <ListItemText primary={filename} />
+                </ListItem>
+              ))}
+            </List>
+          )}
+
           {selectedFile && (
             <>
               <Box sx={{ mt: 3, mb: 2 }}>
                 <Divider />
               </Box>
-              <Typography variant="h6" gutterBottom>
-                Step 2: Split by Speakers
-              </Typography>
+              <Box sx={{ 
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: 2,
+                mb: 2 
+              }}>
+                <Typography variant="h6" gutterBottom sx={{ mb: 0 }}>
+                  Step 2: Split by Speakers
+                </Typography>
+                <Box sx={{ 
+                  display: 'flex', 
+                  alignItems: 'center',
+                  gap: 1
+                }}>
+                  <Typography variant="body1">
+                    Number of speakers:
+                  </Typography>
+                  <select
+                    value={numSpeakers}
+                    onChange={(e) => setNumSpeakers(Number(e.target.value))}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      border: '1px solid #ccc'
+                    }}
+                  >
+                    <option value={2}>2</option>
+                    <option value={3}>3</option>
+                  </select>
+                </Box>
+              </Box>
               <Button
                 variant="contained"
                 color="secondary"
@@ -647,40 +685,13 @@ function App() {
             </>
           )}
 
-          {originalFiles.length > 0 && (
-            <>
-              <Box sx={{ mt: 3, mb: 1 }}>
-                <Typography variant="h6">Original Files</Typography>
-              </Box>
-              <List>
-                {originalFiles.map(({filename}) => (
-                  <ListItem
-                    key={filename}
-                    secondaryAction={
-                      <IconButton 
-                        edge="end" 
-                        onClick={() => handlePlayPause(filename)}
-                      >
-                        {currentAudio && 
-                         currentAudio.src.includes(filename) && 
-                         isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
-                      </IconButton>
-                    }
-                  >
-                    <ListItemText primary={filename} />
-                  </ListItem>
-                ))}
-              </List>
-            </>
-          )}
-
           {splitFiles.length > 0 && (
             <>
               <Box sx={{ mt: 3, mb: 1 }}>
                 <Typography variant="h6">Speaker Splits</Typography>
               </Box>
               <Grid container spacing={2}>
-                {splitFiles.map(({filename}) => (
+                {splitFiles.map(({filename}, index) => (
                   <Grid item xs={6} key={filename}>
                     <Paper elevation={2} sx={{ p: 2 }}>
                       <Box sx={{ 
@@ -688,42 +699,37 @@ function App() {
                         flexDirection: 'column',
                         gap: 1
                       }}>
-                        <Typography variant="subtitle1" noWrap>
-                          {filename}
-                        </Typography>
-                        <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center' }}>
-                          <IconButton 
-                            onClick={() => handlePlayPause(filename)}
-                            size="small"
-                          >
-                            {currentAudio && 
-                             currentAudio.src.includes(filename) && 
-                             isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
-                          </IconButton>
-                          <Button
-                            variant="contained"
-                            size="small"
-                            onClick={() => handleRhubarbProcess(filename)}
-                            disabled={processingRhubarb[filename]}
-                            startIcon={processingRhubarb[filename] ? 
-                              <CircularProgress size={16} /> : 
-                              <SpeakerNotesIcon />}
-                          >
-                            {processingRhubarb[filename] ? 'Processing...' : 'Generate Lip Sync'}
-                          </Button>
-                          {rhubarbResults[filename] && (
-                            <IconButton
-                              onClick={() => toggleResultExpansion(filename)}
+                        <Box sx={{ 
+                          display: 'flex', 
+                          alignItems: 'center',
+                          justifyContent: 'space-between'
+                        }}>
+                          <Typography variant="subtitle1" noWrap>
+                            {getSpeakerDisplayName(filename, index)}
+                          </Typography>
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <IconButton 
+                              onClick={() => handlePlayPause(filename)}
                               size="small"
                             >
-                              {expandedResults[filename] ? 
-                                <ExpandLessIcon /> : 
-                                <ExpandMoreIcon />}
+                              {currentAudio && 
+                               currentAudio.src.includes(filename) && 
+                               isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
                             </IconButton>
-                          )}
+                            {rhubarbResults[filename] && (
+                              <IconButton
+                                onClick={() => toggleResultExpansion(filename)}
+                                size="small"
+                              >
+                                {expandedResults[filename] ? 
+                                  <ExpandLessIcon /> : 
+                                  <ExpandMoreIcon />}
+                              </IconButton>
+                            )}
+                          </Box>
                         </Box>
                         {(processingRhubarb[filename] || rhubarbProgress[filename]?.status === 'processing') && (
-                          <Box sx={{ width: '100%', mt: 1 }}>
+                          <Box sx={{ width: '100%' }}>
                             <Typography variant="body2" color="text.secondary" align="center" gutterBottom>
                               {rhubarbProgress[filename]?.progress || 0}%
                             </Typography>
@@ -739,46 +745,27 @@ function App() {
                             {renderRhubarbResults(filename)}
                           </Collapse>
                         )}
-                        {rhubarbResults[filename] && (
-                          <>
-                            <Button
-                              variant="contained"
-                              size="small"
-                              onClick={() => handleGenerateVideo(filename)}
-                              disabled={generatingVideo[filename]}
-                              startIcon={generatingVideo[filename] ? 
-                                <CircularProgress size={16} /> : 
-                                <MovieIcon />}
-                            >
-                              {generatingVideo[filename] ? 'Generating...' : 'Show Animation'}
-                            </Button>
-                            {mouthCues[filename] && (
-                              <Box sx={{ 
-                                width: '100%', 
-                                mt: 1,
-                                position: 'relative',
-                                aspectRatio: '16/9',
-                                backgroundColor: '#000'
-                              }}>
-                                {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => (
-                                  renderMouthShape(shape, { 
-                                    position: 'absolute',
-                                    top: '50%',
-                                    left: '50%',
-                                    transform: 'translate(-50%, -50%)',
-                                    maxWidth: '33%',
-                                    display: currentMouthShape[filename] === shape ? 'block' : 'none'
-                                  }, filename)
-                                ))}
-                              </Box>
-                            )}
-                          </>
-                        )}
                       </Box>
                     </Paper>
                   </Grid>
                 ))}
               </Grid>
+              <Box sx={{ mt: 2 }}>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  fullWidth
+                  onClick={handleGenerateAllLipSync}
+                  disabled={Object.values(processingRhubarb).some(Boolean)}
+                  startIcon={Object.values(processingRhubarb).some(Boolean) ? 
+                    <CircularProgress size={20} /> : 
+                    <SpeakerNotesIcon />}
+                >
+                  {Object.values(processingRhubarb).some(Boolean) ? 
+                    'Generating Lip Sync...' : 
+                    'Generate Lip Sync for All Speakers'}
+                </Button>
+              </Box>
             </>
           )}
         </Paper>
@@ -895,131 +882,156 @@ function App() {
                     <LinearProgress />
                   </Box>
                 )}
-                <Card>
-                  <Box sx={{ position: 'relative' }}>
-                    <CardMedia
-                      component="img"
-                      sx={{
-                        width: '100%',
-                        height: 'auto',
-                        objectFit: 'contain',
-                        maxHeight: '70vh'
-                      }}
-                      image={selectedBackground === 'default' ? 
-                        '/assets/backgrounds/background.jpg' : 
-                        customBackground}
-                      alt="Selected background"
-                    />
-                    
-                    {Object.entries(mouthPositions).map(([filename, position]) => (
-                      <Box
-                        key={filename}
-                        sx={{
-                          position: 'absolute',
-                          top: 0,
-                          left: 0,
-                          width: '100%',
-                          height: '100%',
-                          cursor: selectedMouth === filename ? 'move' : 'pointer',
-                          border: selectedMouth === filename ? '2px solid blue' : 'none'
-                        }}
-                        onClick={() => setSelectedMouth(filename)}
-                      >
-                        {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => 
-                          renderMouthShape(shape, { 
-                            position: 'absolute',
-                            top: `${position.y}%`,
-                            left: `${position.x}%`,
-                            transform: `translate(-50%, -50%) scale(${position.scale}) rotate(${position.rotation}deg)`,
-                            maxWidth: '33%',
-                            display: currentMouthShape[filename] === shape ? 'block' : 'none'
-                          }, filename)
-                        )}
+                <Grid container spacing={2}>
+                  <Grid item xs={9}>
+                    <Card>
+                      <Box sx={{ position: 'relative' }}>
+                        <CardMedia
+                          component="img"
+                          sx={{
+                            width: '100%',
+                            height: 'auto',
+                            objectFit: 'contain',
+                            maxHeight: '70vh'
+                          }}
+                          image={selectedBackground === 'default' ? 
+                            '/assets/backgrounds/background.jpg' : 
+                            customBackground}
+                          alt="Selected background"
+                        />
+                        
+                        {Object.entries(mouthPositions).map(([filename, position]) => (
+                          <Box
+                            key={filename}
+                            sx={{
+                              position: 'absolute',
+                              top: 0,
+                              left: 0,
+                              width: '100%',
+                              height: '100%',
+                              cursor: selectedMouth === filename ? 'move' : 'pointer',
+                              border: selectedMouth === filename ? '2px solid blue' : 'none'
+                            }}
+                            onClick={() => setSelectedMouth(filename)}
+                          >
+                            {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => 
+                              renderMouthShape(shape, { 
+                                position: 'absolute',
+                                top: `${position.y}%`,
+                                left: `${position.x}%`,
+                                transform: `translate(-50%, -50%) scale(${position.scale}) rotate(${position.rotation}deg)`,
+                                maxWidth: '33%',
+                                display: currentMouthShape[filename] === shape ? 'block' : 'none'
+                              }, filename)
+                            )}
+                          </Box>
+                        ))}
                       </Box>
-                    ))}
-                  </Box>
-                </Card>
-
-                <Box sx={{ mt: 2 }}>
-                  <Typography variant="subtitle1" gutterBottom>
-                    Add Mouth Animation
-                  </Typography>
-                  <Grid container spacing={2}>
-                    {splitFiles.map(({filename}) => (
-                      <Grid item xs={6} key={filename}>
-                        <Button
-                          variant="outlined"
-                          fullWidth
-                          onClick={() => handleAddMouth(filename)}
-                          disabled={mouthPositions[filename]}
-                        >
-                          Add {filename}
-                        </Button>
-                      </Grid>
-                    ))}
+                    </Card>
                   </Grid>
-                </Box>
+                  <Grid item xs={3} sx={{ maxWidth: '300px' }}>
+                    <Box sx={{ 
+                      display: 'flex', 
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <Box>
+                        <Typography variant="caption" gutterBottom>
+                          Mouth Animation
+                        </Typography>
+                        <Grid container spacing={0.5}>
+                          {splitFiles.map(({filename}, index) => (
+                            <Grid item xs={12} key={filename}>
+                              <Button
+                                variant={selectedMouth === filename ? "contained" : "outlined"}
+                                fullWidth
+                                onClick={() => {
+                                  if (!mouthPositions[filename]) {
+                                    handleAddMouth(filename);
+                                  }
+                                  setSelectedMouth(selectedMouth === filename ? null : filename);
+                                }}
+                                size="small"
+                                sx={{ 
+                                  py: 0.5,
+                                  fontSize: '0.75rem',
+                                  minHeight: 0
+                                }}
+                              >
+                                {mouthPositions[filename] ? 
+                                  getSpeakerDisplayName(filename, index) :
+                                  `Add ${getSpeakerDisplayName(filename, index)}`
+                                }
+                              </Button>
+                            </Grid>
+                          ))}
+                        </Grid>
+                      </Box>
 
-                {selectedMouth && mouthPositions[selectedMouth] && (
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="subtitle1" gutterBottom>
-                      Adjust Selected Mouth
-                    </Typography>
-                    <Grid container spacing={2}>
-                      <Grid item xs={6}>
-                        <Typography>X Position: {mouthPositions[selectedMouth].x}%</Typography>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={mouthPositions[selectedMouth].x}
-                          onChange={(e) => handleMouthChange(selectedMouth, 'x', Number(e.target.value))}
-                        />
-                      </Grid>
-                      <Grid item xs={6}>
-                        <Typography>Y Position: {mouthPositions[selectedMouth].y}%</Typography>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={mouthPositions[selectedMouth].y}
-                          onChange={(e) => handleMouthChange(selectedMouth, 'y', Number(e.target.value))}
-                        />
-                      </Grid>
-                      <Grid item xs={6}>
-                        <Typography>Scale: {mouthPositions[selectedMouth].scale.toFixed(1)}x</Typography>
-                        <input
-                          type="range"
-                          min="0.1"
-                          max="3"
-                          step="0.1"
-                          value={mouthPositions[selectedMouth].scale}
-                          onChange={(e) => handleMouthChange(selectedMouth, 'scale', Number(e.target.value))}
-                        />
-                      </Grid>
-                      <Grid item xs={6}>
-                        <Typography>Rotation: {mouthPositions[selectedMouth].rotation}°</Typography>
-                        <input
-                          type="range"
-                          min="-180"
-                          max="180"
-                          value={mouthPositions[selectedMouth].rotation}
-                          onChange={(e) => handleMouthChange(selectedMouth, 'rotation', Number(e.target.value))}
-                        />
-                      </Grid>
-                      <Grid item xs={6}>
-                        <Typography>Reflect</Typography>
-                        <Button
-                          variant={reflectedMouths[selectedMouth] ? "contained" : "outlined"}
-                          onClick={() => handleMouthReflect(selectedMouth)}
-                          fullWidth
-                        >
-                          {reflectedMouths[selectedMouth] ? "Reflected" : "Normal"}
-                        </Button>
-                      </Grid>
-                    </Grid>
-                  </Box>
-                )}
+                      {selectedMouth && mouthPositions[selectedMouth] && (
+                        <Box>
+                          <Typography variant="subtitle2" gutterBottom>
+                            Adjust Selected Mouth
+                          </Typography>
+                          <Grid container spacing={2}>
+                            <Grid item xs={12}>
+                              <Typography variant="caption">X Position: {mouthPositions[selectedMouth].x}%</Typography>
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={mouthPositions[selectedMouth].x}
+                                onChange={(e) => handleMouthChange(selectedMouth, 'x', Number(e.target.value))}
+                              />
+                            </Grid>
+                            <Grid item xs={12}>
+                              <Typography variant="caption">Y Position: {mouthPositions[selectedMouth].y}%</Typography>
+                              <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                value={mouthPositions[selectedMouth].y}
+                                onChange={(e) => handleMouthChange(selectedMouth, 'y', Number(e.target.value))}
+                              />
+                            </Grid>
+                            <Grid item xs={12}>
+                              <Typography variant="caption">Scale: {mouthPositions[selectedMouth].scale.toFixed(2)}x</Typography>
+                              <input
+                                type="range"
+                                min="0.1"
+                                max="3"
+                                step="0.01"
+                                value={mouthPositions[selectedMouth].scale}
+                                onChange={(e) => handleMouthChange(selectedMouth, 'scale', Number(e.target.value))}
+                              />
+                            </Grid>
+                            <Grid item xs={12}>
+                              <Typography variant="caption">Rotation: {mouthPositions[selectedMouth].rotation}°</Typography>
+                              <input
+                                type="range"
+                                min="-180"
+                                max="180"
+                                value={mouthPositions[selectedMouth].rotation}
+                                onChange={(e) => handleMouthChange(selectedMouth, 'rotation', Number(e.target.value))}
+                              />
+                            </Grid>
+                            <Grid item xs={12}>
+                              <Typography variant="caption">Reflect</Typography>
+                              <Button
+                                variant={reflectedMouths[selectedMouth] ? "contained" : "outlined"}
+                                onClick={() => handleMouthReflect(selectedMouth)}
+                                fullWidth
+                                size="small"
+                              >
+                                {reflectedMouths[selectedMouth] ? "Reflected" : "Normal"}
+                              </Button>
+                            </Grid>
+                          </Grid>
+                        </Box>
+                      )}
+                    </Box>
+                  </Grid>
+                </Grid>
               </Box>
             )}
           </Paper>

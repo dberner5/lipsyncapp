@@ -27,4 +27,3 @@ The application uses Docker volumes for development, so any changes you make to 
 
 ## API Endpoints
 
-- GET `/api/hello`: Returns a "Hello World" message 

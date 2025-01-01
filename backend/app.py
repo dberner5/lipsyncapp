@@ -18,6 +18,9 @@ import time
 import tempfile
 import base64
 from urllib.parse import unquote
+import fnmatch
+import fcntl
+import errno
 
 
 # Configure logging first
@@ -194,9 +197,9 @@ def convert_to_wav(input_path):
         logger.error(f"Error converting audio: {e}")
         raise
 
-def process_audio_file(file_path):
+def process_audio_file(file_path, num_speakers):
     """Process audio file using torchaudio and return diarization"""
-    logger.info(f"Processing audio file: {file_path}")
+    logger.info(f"Processing audio file: {file_path} with {num_speakers} speakers")
     
     # Convert to WAV if not already
     if not file_path.lower().endswith('.wav'):
@@ -216,21 +219,71 @@ def process_audio_file(file_path):
         diarization = pipeline({
             "waveform": waveform,
             "sample_rate": sample_rate,
-            "num_speakers": 2,
+            "num_speakers": num_speakers,
             "hook": hook
         })
     
     return diarization
 
+def clean_directory(directory, pattern=None, keep_latest=None):
+    """Clean a directory by removing all files except the latest ones matching the pattern.
+    
+    Args:
+        directory (str): Directory to clean
+        pattern (str, optional): Glob pattern to match files. If None, matches all files.
+        keep_latest (str, optional): Base filename to keep latest version of. If None, keeps latest of all files.
+    """
+    if not os.path.exists(directory):
+        return
+
+    # Get all files in directory
+    files = []
+    for f in os.listdir(directory):
+        if pattern and not fnmatch.fnmatch(f, pattern):
+            continue
+        
+        full_path = os.path.join(directory, f)
+        if os.path.isfile(full_path):
+            files.append((full_path, os.path.getmtime(full_path)))
+    
+    if not files:
+        return
+
+    # Sort by modification time, newest first
+    files.sort(key=lambda x: x[1], reverse=True)
+    
+    # If keep_latest is specified, keep only the latest file with that base name
+    # Otherwise, keep only the latest file overall
+    if keep_latest:
+        kept_files = set()
+        for file_path, _ in files:
+            base_name = os.path.basename(file_path)
+            if base_name.startswith(keep_latest):
+                kept_files.add(file_path)
+                break
+        
+        # Delete all other files
+        for file_path, _ in files:
+            if file_path not in kept_files:
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Cleaned up old file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to remove file {file_path}: {e}")
+    else:
+        # Keep only the latest file
+        latest_file = files[0][0]
+        for file_path, _ in files[1:]:
+            try:
+                os.remove(file_path)
+                logger.debug(f"Cleaned up old file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to remove file {file_path}: {e}")
+
 @app.route('/health')
 def health():
     logger.debug('Health check requested')
     return jsonify({"status": "healthy"})
-
-@app.route('/api/hello')
-def hello():
-    logger.debug('Hello endpoint requested')
-    return jsonify({"message": "Hello World!"})
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
@@ -244,6 +297,13 @@ def upload_file():
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        
+        # Clean up old uploads before saving new one
+        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.wav')
+        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.mp3')
+        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.ogg')
+        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.m4a')
+        
         file.save(file_path)
         return jsonify({
             "message": "File uploaded successfully",
@@ -271,8 +331,17 @@ def diarize_audio(filename):
         return jsonify({"error": "File not found"}), 404
     
     try:
+        # Get number of speakers from request
+        data = request.get_json()
+        num_speakers = data.get('numSpeakers', 2)  # Default to 2 if not specified
+        
+        # Clean up old split files before generating new ones
+        base_name = os.path.splitext(filename)[0]
+        splits_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'splits')
+        clean_directory(splits_dir, pattern=f"{base_name}_*.wav")
+        
         # Process audio file
-        diarization = process_audio_file(file_path)
+        diarization = process_audio_file(file_path, num_speakers)
         
         # Split audio into separate files
         splits = split_audio(file_path, diarization)
@@ -344,9 +413,13 @@ def process_rhubarb(filename):
             yield f"data: {json.dumps(error_data)}\n\n"
             return
         
-        # Prepare output path
+        # Clean up old results before generating new ones
+        base_name = os.path.splitext(filename)[0]
         results_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'results')
-        output_filename = f"{Path(filename).stem}_rhubarb.json"
+        clean_directory(results_dir, pattern=f"{base_name}_*.json")
+        
+        # Prepare output path
+        output_filename = f"{base_name}_rhubarb.json"
         output_path = os.path.join(results_dir, output_filename)
         
         try:
@@ -354,6 +427,7 @@ def process_rhubarb(filename):
             command = [
                 RHUBARB_PATH,
                 "-f", "json",
+                "--machineReadable",
                 input_path,
                 "-o", output_path
             ]
@@ -365,20 +439,66 @@ def process_rhubarb(filename):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                bufsize=1,
-                universal_newlines=True
+                bufsize=1,  # Line buffering
+                universal_newlines=True,
+                env={**os.environ, 'PYTHONUNBUFFERED': '1'}  # Force Python to disable buffering
             )
             
             # Read stderr in real-time to track progress
-            for line in process.stderr:
-                logger.debug(f"Rhubarb output: {line.strip()}")
-                if "Generating output" in line:
-                    progress_data['progress'] = 90
-                elif "Analyzing audio" in line:
-                    progress_data['progress'] = 30
-                elif "Detecting speech" in line:
-                    progress_data['progress'] = 60
-                yield f"data: {json.dumps(progress_data)}\n\n"
+            logger.info("Starting to read Rhubarb output...")
+            
+            # Create non-blocking readers for both pipes
+            import fcntl
+            import os
+            
+            # Set non-blocking mode for stderr
+            stderr_fd = process.stderr.fileno()
+            flags = fcntl.fcntl(stderr_fd, fcntl.F_GETFL)
+            fcntl.fcntl(stderr_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            
+            # Read both stdout and stderr for debugging
+            while True:
+                try:
+                    stderr_line = process.stderr.readline()
+                    if stderr_line:
+                        logger.info(f"Rhubarb stderr: {stderr_line.strip()}")
+                        
+                        # Try to parse the JSON event from stderr
+                        try:
+                            event = json.loads(stderr_line)
+                            if event['type'] == 'progress':
+                                # Convert from 0-1 to 0-100 percentage
+                                progress_data['progress'] = int(event['value'] * 100)
+                                logger.info(f"Progress update: {progress_data['progress']}%")
+                                yield f"data: {json.dumps(progress_data)}\n\n"
+                            elif event['type'] == 'failure':
+                                error_data = {'status': 'error', 'error': event['reason']}
+                                yield f"data: {json.dumps(error_data)}\n\n"
+                                return
+                        except json.JSONDecodeError:
+                            # Not a JSON line, ignore it
+                            pass
+                except IOError as e:
+                    if e.errno != errno.EAGAIN:  # If error is not "no data available"
+                        raise  # Re-raise the error if it's not the "no data" error
+                    time.sleep(0.1)  # Short sleep to prevent CPU spinning
+                
+                # Check if process has finished
+                if process.poll() is not None:
+                    # Read any remaining output
+                    remaining_stderr = process.stderr.read()
+                    if remaining_stderr:
+                        for line in remaining_stderr.splitlines():
+                            logger.info(f"Rhubarb stderr: {line.strip()}")
+                            try:
+                                event = json.loads(line)
+                                if event['type'] == 'progress':
+                                    progress_data['progress'] = int(event['value'] * 100)
+                                    logger.info(f"Progress update: {progress_data['progress']}%")
+                                    yield f"data: {json.dumps(progress_data)}\n\n"
+                            except json.JSONDecodeError:
+                                pass
+                    break
             
             process.wait()
             
