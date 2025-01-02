@@ -22,7 +22,6 @@ import fnmatch
 import fcntl
 import errno
 
-
 # Configure logging first
 logging.basicConfig(
     level=logging.DEBUG,
@@ -53,7 +52,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 # Create necessary directories
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(UPLOAD_FOLDER, 'splits'), exist_ok=True)
-os.makedirs(os.path.join(UPLOAD_FOLDER, 'results'), exist_ok=True)
+os.makedirs(os.path.join(UPLOAD_FOLDER, 'lipsync'), exist_ok=True)
 
 # Configure rhubarb path
 RHUBARB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'executables', 'Rhubarb-Lip-Sync-1.13.0-Linux', 'rhubarb')
@@ -280,6 +279,42 @@ def clean_directory(directory, pattern=None, keep_latest=None):
             except Exception as e:
                 logger.error(f"Failed to remove file {file_path}: {e}")
 
+def clean_all_uploads():
+    """Clean all files in uploads directory and its subdirectories"""
+    # Clean main uploads directory
+    for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                logger.debug(f"Cleaned up file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to remove file {file_path}: {e}")
+
+    # Clean splits directory
+    splits_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'splits')
+    if os.path.exists(splits_dir):
+        for filename in os.listdir(splits_dir):
+            file_path = os.path.join(splits_dir, filename)
+            if os.path.isfile(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Cleaned up split file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to remove split file {file_path}: {e}")
+
+    # Clean lipsync directory
+    lipsync_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'lipsync')
+    if os.path.exists(lipsync_dir):
+        for filename in os.listdir(lipsync_dir):
+            file_path = os.path.join(lipsync_dir, filename)
+            if os.path.isfile(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Cleaned up lipsync file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to remove lipsync file {file_path}: {e}")
+
 @app.route('/health')
 def health():
     logger.debug('Health check requested')
@@ -298,11 +333,8 @@ def upload_file():
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
-        # Clean up old uploads before saving new one
-        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.wav')
-        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.mp3')
-        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.ogg')
-        clean_directory(app.config['UPLOAD_FOLDER'], pattern='*.m4a')
+        # Clean all files in uploads directory and its subdirectories
+        clean_all_uploads()
         
         file.save(file_path)
         return jsonify({
@@ -404,25 +436,37 @@ def process_rhubarb(filename):
         # Send initial progress
         yield f"data: {json.dumps(progress_data)}\n\n"
         
-        # Verify the file exists in splits directory
-        splits_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'splits')
-        input_path = os.path.join(splits_dir, filename)
-        
-        if not os.path.exists(input_path):
-            error_data = {'status': 'error', 'error': 'File not found'}
-            yield f"data: {json.dumps(error_data)}\n\n"
-            return
-        
-        # Clean up old results before generating new ones
-        base_name = os.path.splitext(filename)[0]
-        results_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'results')
-        clean_directory(results_dir, pattern=f"{base_name}_*.json")
-        
-        # Prepare output path
-        output_filename = f"{base_name}_rhubarb.json"
-        output_path = os.path.join(results_dir, output_filename)
-        
         try:
+            # Get the input file path
+            input_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            if not os.path.exists(input_path):
+                # Check if file exists in splits directory
+                splits_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'splits')
+                input_path = os.path.join(splits_dir, filename)
+                if not os.path.exists(input_path):
+                    error_data = {'status': 'error', 'error': 'File not found'}
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    return
+
+            # Convert to WAV if not already
+            if not input_path.lower().endswith('.wav'):
+                try:
+                    input_path = convert_to_wav(input_path)
+                    logger.info(f"Converted to WAV: {input_path}")
+                except Exception as e:
+                    error_data = {'status': 'error', 'error': f'Failed to convert to WAV: {str(e)}'}
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    return
+            
+            # Clean up old results before generating new ones
+            base_name = os.path.splitext(os.path.basename(input_path))[0]
+            lipsync_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'lipsync')
+            clean_directory(lipsync_dir, pattern=f"{base_name}_*.json")
+            
+            # Prepare output path
+            output_filename = f"{base_name}_rhubarb.json"
+            output_path = os.path.join(lipsync_dir, output_filename)
+            
             # Run rhubarb command
             command = [
                 RHUBARB_PATH,
@@ -446,10 +490,6 @@ def process_rhubarb(filename):
             
             # Read stderr in real-time to track progress
             logger.info("Starting to read Rhubarb output...")
-            
-            # Create non-blocking readers for both pipes
-            import fcntl
-            import os
             
             # Set non-blocking mode for stderr
             stderr_fd = process.stderr.fileno()
@@ -534,15 +574,15 @@ def process_rhubarb(filename):
 @app.route('/api/results/<filename>')
 def get_result(filename):
     """Retrieve a rhubarb result file"""
-    return send_from_directory(os.path.join(app.config['UPLOAD_FOLDER'], 'results'), filename)
+    return send_from_directory(os.path.join(app.config['UPLOAD_FOLDER'], 'lipsync'), filename)
 
 @app.route('/api/results')
 def list_results():
     """List all rhubarb result files"""
     results = []
-    results_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'results')
-    if os.path.exists(results_dir):
-        for filename in os.listdir(results_dir):
+    lipsync_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'lipsync')
+    if os.path.exists(lipsync_dir):
+        for filename in os.listdir(lipsync_dir):
             if filename.endswith('.json'):
                 results.append(filename)
     return jsonify({"results": results})
@@ -553,8 +593,8 @@ def generate_video(filename):
     logger.info(f"Getting lip sync data for {filename}")
     
     # Get the rhubarb results
-    results_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'results')
-    rhubarb_file = os.path.join(results_dir, filename)
+    lipsync_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'lipsync')
+    rhubarb_file = os.path.join(lipsync_dir, filename)
     
     if not os.path.exists(rhubarb_file):
         logger.error(f"Rhubarb file not found: {rhubarb_file}")

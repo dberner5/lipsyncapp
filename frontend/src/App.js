@@ -28,6 +28,7 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import MovieIcon from '@mui/icons-material/Movie';
 import AddPhotoAlternateIcon from '@mui/icons-material/AddPhotoAlternate';
 import DownloadIcon from '@mui/icons-material/Download';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 
 function App() {
   const [message, setMessage] = useState('');
@@ -170,6 +171,31 @@ function App() {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Clear all audio-related state and speaker splits
+    setFiles([]);
+    setSelectedFile(null);
+    setRhubarbResults({});
+    setExpandedResults({});
+    setProcessingRhubarb({});
+    setRhubarbProgress({});
+    setMouthCues({});
+    setCurrentMouthShape({});
+    setMouthPositions({});  // Clear mouth positions
+    setSelectedMouth(null);  // Clear selected mouth
+    setReflectedMouths({}); // Clear reflected state
+
+    // Stop any playing audio
+    if (currentAudio) {
+      currentAudio.pause();
+      setCurrentAudio(null);
+      setIsPlaying(false);
+    }
+    if (masterAudio) {
+      masterAudio.pause();
+      setMasterAudio(null);
+      setIsMasterPlaying(false);
+    }
+
     const formData = new FormData();
     formData.append('file', file);
 
@@ -182,6 +208,7 @@ function App() {
       
       if (response.ok) {
         setSelectedFile(data.filename);
+        setFiles([{ filename: data.filename, type: 'original' }]);
         fetchFiles();
       } else {
         setError(data.error || 'Upload failed');
@@ -507,7 +534,8 @@ function App() {
   }, [preloadedImages, imageLoadingStatus, reflectedMouths]);
 
   const handleMasterPlayPause = () => {
-    if (!originalFiles[0]) return;
+    const audioFile = numSpeakers === 1 ? selectedFile : originalFiles[0]?.filename;
+    if (!audioFile) return;
 
     if (isMasterPlaying) {
       masterAudio?.pause();
@@ -516,7 +544,7 @@ function App() {
       if (masterAudio) {
         masterAudio.play();
       } else {
-        const audio = new Audio(`http://127.0.0.1:5000/api/audio/${originalFiles[0].filename}`);
+        const audio = new Audio(`http://127.0.0.1:5000/api/audio/${audioFile}`);
         audio.addEventListener('timeupdate', () => {
           // Update all mouth shapes
           Object.keys(mouthPositions).forEach(filename => {
@@ -534,7 +562,8 @@ function App() {
   };
 
   const handleDownloadVideo = async () => {
-    if (!originalFiles[0] || !Object.keys(mouthPositions).length) return;
+    const audioFile = numSpeakers === 1 ? selectedFile : originalFiles[0]?.filename;
+    if (!audioFile || !Object.keys(mouthPositions).length) return;
     
     setGeneratingMp4(true);
     setMp4Progress(0);
@@ -542,7 +571,7 @@ function App() {
 
     try {
       const videoData = {
-        audioFile: originalFiles[0].filename,
+        audioFile,
         background: selectedBackground === 'default' ? 'default' : customBackground,
         mouths: Object.entries(mouthPositions).map(([filename, position]) => ({
           filename,
@@ -614,25 +643,22 @@ function App() {
             />
           </Button>
 
-          {originalFiles.length > 0 && (
+          {selectedFile && (
             <List>
-              {originalFiles.map(({filename}) => (
-                <ListItem
-                  key={filename}
-                  secondaryAction={
-                    <IconButton 
-                      edge="end" 
-                      onClick={() => handlePlayPause(filename)}
-                    >
-                      {currentAudio && 
-                       currentAudio.src.includes(filename) && 
-                       isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
-                    </IconButton>
-                  }
-                >
-                  <ListItemText primary={filename} />
-                </ListItem>
-              ))}
+              <ListItem
+                secondaryAction={
+                  <IconButton 
+                    edge="end" 
+                    onClick={() => handlePlayPause(selectedFile)}
+                  >
+                    {currentAudio && 
+                     currentAudio.src.includes(selectedFile) && 
+                     isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
+                  </IconButton>
+                }
+              >
+                <ListItemText primary={selectedFile} />
+              </ListItem>
             </List>
           )}
 
@@ -667,21 +693,64 @@ function App() {
                       border: '1px solid #ccc'
                     }}
                   >
+                    <option value={1}>1</option>
                     <option value={2}>2</option>
                     <option value={3}>3</option>
                   </select>
                 </Box>
               </Box>
-              <Button
-                variant="contained"
-                color="secondary"
-                fullWidth
-                onClick={handleDiarize}
-                disabled={processing}
-                startIcon={processing ? <CircularProgress size={20} /> : <GroupIcon />}
-              >
-                {processing ? 'Processing...' : 'Split by Speakers'}
-              </Button>
+              {numSpeakers === 1 ? (
+                <>
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    fullWidth
+                    onClick={() => handleRhubarbProcess(selectedFile)}
+                    disabled={processing}
+                    startIcon={processing ? <CircularProgress size={20} /> : <RecordVoiceOverIcon />}
+                  >
+                    {processing ? 'Processing...' : 'Generate Lipsync'}
+                  </Button>
+                  {(processingRhubarb[selectedFile] || rhubarbProgress[selectedFile]?.status === 'processing') && (
+                    <Box sx={{ width: '100%', mt: 2 }}>
+                      <Typography variant="body2" color="text.secondary" align="center" gutterBottom>
+                        {rhubarbProgress[selectedFile]?.progress || 0}%
+                      </Typography>
+                      <LinearProgress 
+                        variant="determinate" 
+                        value={rhubarbProgress[selectedFile]?.progress || 0}
+                        sx={{ height: 8, borderRadius: 4 }}
+                      />
+                    </Box>
+                  )}
+                  {rhubarbResults[selectedFile] && !processingRhubarb[selectedFile] && (
+                    <Box sx={{ mt: 1 }}>
+                      <Typography 
+                        variant="caption" 
+                        sx={{ 
+                          color: 'success.main',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 0.5
+                        }}
+                      >
+                        ✓ Completed
+                      </Typography>
+                    </Box>
+                  )}
+                </>
+              ) : (
+                <Button
+                  variant="contained"
+                  color="secondary"
+                  fullWidth
+                  onClick={handleDiarize}
+                  disabled={processing}
+                  startIcon={processing ? <CircularProgress size={20} /> : <GroupIcon />}
+                >
+                  {processing ? 'Processing...' : 'Split by Speakers'}
+                </Button>
+              )}
             </>
           )}
 
@@ -740,6 +809,19 @@ function App() {
                             />
                           </Box>
                         )}
+                        {rhubarbResults[filename] && !processingRhubarb[filename] && (
+                          <Typography 
+                            variant="caption" 
+                            sx={{ 
+                              color: 'success.main',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.5
+                            }}
+                          >
+                            ✓ Completed
+                          </Typography>
+                        )}
                         {rhubarbResults[filename] && (
                           <Collapse in={expandedResults[filename]}>
                             {renderRhubarbResults(filename)}
@@ -770,7 +852,7 @@ function App() {
           )}
         </Paper>
 
-        {splitFiles.length > 0 && (
+        {(splitFiles.length > 0 || (numSpeakers === 1 && rhubarbResults[selectedFile])) && (
           <Paper sx={{ p: 2, width: '100%', mt: 3 }}>
             <Typography variant="h6" gutterBottom>
               Create Video
@@ -862,7 +944,7 @@ function App() {
                       variant="contained"
                       startIcon={isMasterPlaying ? <PauseIcon /> : <PlayArrowIcon />}
                       onClick={handleMasterPlayPause}
-                      disabled={!originalFiles.length || !Object.keys(mouthPositions).length}
+                      disabled={!(numSpeakers === 1 ? selectedFile : originalFiles[0]) || !Object.keys(mouthPositions).length}
                     >
                       {isMasterPlaying ? 'Pause' : 'Play Animation'}
                     </Button>
@@ -871,7 +953,7 @@ function App() {
                       color="secondary"
                       startIcon={<DownloadIcon />}
                       onClick={handleDownloadVideo}
-                      disabled={!originalFiles.length || !Object.keys(mouthPositions).length || generatingMp4}
+                      disabled={!(numSpeakers === 1 ? selectedFile : originalFiles[0]) || !Object.keys(mouthPositions).length || generatingMp4}
                     >
                       {generatingMp4 ? 'Generating...' : 'Download MP4'}
                     </Button>
@@ -910,9 +992,62 @@ function App() {
                               width: '100%',
                               height: '100%',
                               cursor: selectedMouth === filename ? 'move' : 'pointer',
-                              border: selectedMouth === filename ? '2px solid blue' : 'none'
+                              pointerEvents: selectedMouth && selectedMouth !== filename ? 'none' : 'auto',
+                              outline: 'none',
+                              WebkitTapHighlightColor: 'transparent',
+                              userSelect: 'none'
                             }}
-                            onClick={() => setSelectedMouth(filename)}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              
+                              // Set selected mouth on mouse down
+                              setSelectedMouth(filename);
+                              
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const startX = e.clientX;
+                              const startY = e.clientY;
+                              const startPosX = position.x;
+                              const startPosY = position.y;
+
+                              const handleMouseMove = (moveEvent) => {
+                                moveEvent.preventDefault();
+                                const deltaX = moveEvent.clientX - startX;
+                                const deltaY = moveEvent.clientY - startY;
+                                
+                                // Convert pixel change to percentage change based on container size
+                                const percentX = (deltaX / rect.width) * 100;
+                                const percentY = (deltaY / rect.height) * 100;
+                                
+                                handleMouthChange(filename, 'x', Math.max(0, Math.min(100, startPosX + percentX)));
+                                handleMouthChange(filename, 'y', Math.max(0, Math.min(100, startPosY + percentY)));
+                              };
+
+                              const handleMouseUp = () => {
+                                document.removeEventListener('mousemove', handleMouseMove);
+                                document.removeEventListener('mouseup', handleMouseUp);
+                              };
+
+                              document.addEventListener('mousemove', handleMouseMove);
+                              document.addEventListener('mouseup', handleMouseUp);
+                            }}
+                            onWheel={(e) => {
+                              if (selectedMouth === filename) {
+                                e.preventDefault();
+                                const delta = -Math.sign(e.deltaY) * 0.05;
+
+                                if (e.ctrlKey) {
+                                  // Scale control with Ctrl + Scroll
+                                  const newScale = Math.max(0.1, Math.min(3, position.scale + delta));
+                                  handleMouthChange(filename, 'scale', newScale);
+                                } else if (e.altKey) {
+                                  // Rotation control with Alt + Scroll
+                                  const rotationDelta = delta * 10;
+                                  const newRotation = Math.max(-180, Math.min(180, position.rotation + rotationDelta));
+                                  handleMouthChange(filename, 'rotation', newRotation);
+                                }
+                              }
+                            }}
                           >
                             {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'X'].map(shape => 
                               renderMouthShape(shape, { 
@@ -921,7 +1056,8 @@ function App() {
                                 left: `${position.x}%`,
                                 transform: `translate(-50%, -50%) scale(${position.scale}) rotate(${position.rotation}deg)`,
                                 maxWidth: '33%',
-                                display: currentMouthShape[filename] === shape ? 'block' : 'none'
+                                display: currentMouthShape[filename] === shape ? 'block' : 'none',
+                                border: selectedMouth === filename ? '2px solid blue' : 'none'
                               }, filename)
                             )}
                           </Box>
@@ -940,7 +1076,10 @@ function App() {
                           Mouth Animation
                         </Typography>
                         <Grid container spacing={0.5}>
-                          {splitFiles.map(({filename}, index) => (
+                          {(numSpeakers === 1 ? 
+                            [{ filename: selectedFile }] : 
+                            splitFiles
+                          ).map(({filename}, index) => (
                             <Grid item xs={12} key={filename}>
                               <Button
                                 variant={selectedMouth === filename ? "contained" : "outlined"}
@@ -951,6 +1090,7 @@ function App() {
                                   }
                                   setSelectedMouth(selectedMouth === filename ? null : filename);
                                 }}
+                                disabled={!rhubarbResults[filename] || processingRhubarb[filename]}
                                 size="small"
                                 sx={{ 
                                   py: 0.5,
@@ -959,8 +1099,8 @@ function App() {
                                 }}
                               >
                                 {mouthPositions[filename] ? 
-                                  getSpeakerDisplayName(filename, index) :
-                                  `Add ${getSpeakerDisplayName(filename, index)}`
+                                  (numSpeakers === 1 ? "Speaker" : getSpeakerDisplayName(filename, index)) :
+                                  `Add ${numSpeakers === 1 ? "Speaker" : getSpeakerDisplayName(filename, index)}`
                                 }
                               </Button>
                             </Grid>
